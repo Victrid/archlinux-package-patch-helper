@@ -1,0 +1,319 @@
+#!/bin/bash
+
+# Configurations
+# This will be replaced when patch_helper.sh is called from PKGBUILD
+PATCH_SHARE_DIR="@__PATCH_LOCATION__@"
+PATCH_VAR_DIR="@__PATCH_BACKUP_DIR__@"
+DEBUG="@__PATCH_DEBUG__@"
+
+debug_echo() {
+    if [[ $DEBUG -eq 1 ]]; then
+        echo "$*" >&2
+    fi
+}
+
+error_echo() {
+    echo "Error: $*" >&2
+}
+
+# Read patch information from installed package
+read_patch_info() {
+    local path="$1"
+    if [[ -z "$path" ]]; then
+        path="."
+    fi
+    
+    local info_file="$path/patch.info"
+    
+    if [[ ! -f "$info_file" ]]; then
+        error_echo "Patch info file not found: $info_file"
+        return 1
+    fi
+    
+    declare -gA patch_info
+    
+    while IFS='=' read -r key value; do
+        # Skip empty lines and comments
+        [[ -z "$key" || "$key" =~ ^[[:space:]]*# ]] && continue
+        
+        # Remove leading/trailing whitespace
+        key=$(echo "$key" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+        value=$(echo "$value" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+        
+        if [[ -n "$key" && -n "$value" ]]; then
+            patch_info["$key"]="$value"
+        fi
+    done < "$info_file"
+    
+    debug_echo "Patch info:"
+    for key in "${!patch_info[@]}"; do
+        debug_echo "  $key = ${patch_info[$key]}"
+    done
+    
+    return 0
+}
+
+# Pre-transaction hook (called before any package operation)
+pre_transaction_hook() {
+    local package_name="$1"
+    
+    local share_dir="$PATCH_SHARE_DIR/$package_name"
+    local var_dir="$PATCH_VAR_DIR/$package_name"
+    
+    if ! read_patch_info "$share_dir"; then
+        error_echo "Failed to read patch info for $package_name"
+        return 1
+    fi
+    
+    local patch_pair_files="${patch_info[patch_pair_files]}"
+    
+    read -ra file_pairs <<< "$patch_pair_files"
+    
+    for ((i=0; i<${#file_pairs[@]}; i+=2)); do
+        local original_path="${file_pairs[i]}"
+        local patch_file="${file_pairs[i+1]}"
+        
+        local backup_path="$var_dir/$patch_file"
+        
+        if [[ -f "$backup_path" ]]; then
+            local original_mode
+            if [[ -f "$original_path" ]]; then
+                original_mode=$(stat -c "%a" "$original_path" 2>/dev/null || echo "644")
+            else
+                original_mode="644"
+            fi
+            
+            debug_echo "Restoring $original_path (privilege $original_mode)"
+            
+            # Restore backup
+            if ! mv "$backup_path" "$original_path" 2>/dev/null; then
+                error_echo "Failed to restore $original_path"
+                continue
+            fi
+            
+            # Restore permissions
+            chmod "$original_mode" "$original_path" 2>/dev/null || true
+        fi
+    done
+}
+
+# Post-transaction hook (called after any package operation)
+post_transaction_hook() {
+    local package_name="$1"
+    
+    local share_dir="$PATCH_SHARE_DIR/$package_name"
+    local var_dir="$PATCH_VAR_DIR/$package_name"
+    
+    if ! read_patch_info "$share_dir"; then
+        error_echo "Failed to read patch info for $package_name"
+        return 1
+    fi
+    
+    local patch_pair_files="${patch_info[patch_pair_files]}"
+    
+    read -ra file_pairs <<< "$patch_pair_files"
+    
+    for ((i=0; i<${#file_pairs[@]}; i+=2)); do
+        local original_path="${file_pairs[i]}"
+        local patch_file="${file_pairs[i+1]}"
+        
+        local backup_path="$var_dir/$patch_file"
+        local patched_file="$share_dir/$patch_file"
+        
+        # Make sure backup directory exists
+        if [[ ! -d "$var_dir" ]]; then
+            mkdir -p "$var_dir" || {
+                error_echo "Failed to create backup directory: $var_dir"
+                continue
+            }
+        fi
+        
+        local original_mode
+        if [[ -f "$original_path" ]]; then
+            original_mode=$(stat -c "%a" "$original_path" 2>/dev/null || echo "644")
+        else
+            original_mode="644"
+        fi
+        
+        debug_echo "Backing up $original_path (privilege $original_mode) to $backup_path and patching with $patched_file"
+        
+        # Backup original file
+        if ! cp "$original_path" "$backup_path" 2>/dev/null; then
+            error_echo "Failed to backup $original_path"
+            continue
+        fi
+        
+        # Apply patch
+        if ! cp "$patched_file" "$original_path" 2>/dev/null; then
+            error_echo "Failed to patch $original_path"
+            continue
+        fi
+        
+        # Restore permissions
+        chmod "$original_mode" "$original_path" 2>/dev/null || true
+    done
+}
+
+uninstall_hook() {
+    local package_name="$1"
+    
+    local share_dir="$PATCH_SHARE_DIR/$package_name"
+    local var_dir="$PATCH_VAR_DIR/$package_name"
+    
+    if ! read_patch_info "$share_dir"; then
+        error_echo "Failed to read patch info for $package_name"
+        return 1
+    fi
+    
+    # Remove all backup files
+    if [[ -d "$var_dir" ]]; then
+        debug_echo "Removing backup directory: $var_dir"
+        rm -rf "$var_dir"
+    fi
+
+    # if the PATCH_VAR_DIR is empty, remove it
+    if [[ -d "$PATCH_VAR_DIR" && -z "$(ls -A "$PATCH_VAR_DIR")" ]]; then
+        debug_echo "Removing empty patch var directory: $PATCH_VAR_DIR"
+        rmdir "$PATCH_VAR_DIR"
+    fi
+}
+
+hook_names() {
+    local package_name="$1"
+    
+    echo "regular-update-pre-$package_name.hook"
+    echo "regular-update-post-$package_name.hook"
+    echo "remove-$package_name.hook"
+    echo "install-$package_name.hook"
+}
+
+# Generate pacman hook for a patch package
+generate_hook() {
+    if ! read_patch_info; then
+        error_echo "Failed to read patch info"
+        return 1
+    fi
+    
+    local package_name="${patch_info[package]}"
+    local script_path="${patch_info[location]}/patch.sh"
+    
+    # Normal updates - pre-transaction hook
+    local hook_content="[Trigger]
+Type = Package
+Operation = Upgrade
+Operation = Install
+Target = $package_name
+Target = ${patch_info[patch]}
+
+[Action]
+Description = Restoring ${patch_info[patch]} patched by $package_name...
+When = PreTransaction
+Exec = /bin/bash $script_path pre-transaction $package_name"
+
+    echo "$hook_content" > "regular-update-pre-$package_name.hook"
+    echo "Hook file created: regular-update-pre-$package_name.hook"
+    
+    # Normal updates - post-transaction hook
+    hook_content="[Trigger]
+Type = Package
+Operation = Upgrade
+Target = $package_name
+Target = ${patch_info[patch]}
+
+[Action]
+Description = Patching ${patch_info[patch]} with $package_name...
+When = PostTransaction
+Exec = /bin/bash $script_path post-transaction $package_name"
+
+    echo "$hook_content" > "regular-update-post-$package_name.hook"
+    echo "Hook file created: regular-update-post-$package_name.hook"
+    
+    # Remove hook
+    hook_content="[Trigger]
+Type = Package
+Operation = Remove
+Target = $package_name
+
+[Action]
+Description = Uninstalling patch $package_name patching ${patch_info[patch]}...
+When = PreTransaction
+Exec = /bin/bash $script_path uninstall $package_name"
+
+    echo "$hook_content" > "remove-$package_name.hook"
+    echo "Hook file created: remove-$package_name.hook"
+    
+    # Install hook
+    hook_content="[Trigger]
+Type = Package
+Operation = Install
+Target = $package_name
+
+[Action]
+Description = Patching ${patch_info[patch]} with $package_name...
+When = PostTransaction
+Exec = /bin/bash $script_path post-transaction $package_name"
+
+    echo "$hook_content" > "install-$package_name.hook"
+    echo "Hook file created: install-$package_name.hook"
+}
+
+# Main entry point
+main() {
+    local action="$1"
+    
+    if [[ -z "$action" ]]; then
+        error_echo "Usage: $0 <action> [package_name]"
+        echo "Available actions: pre-transaction, post-transaction, uninstall, generate-hook, get-hooks"
+        exit 1
+    fi
+    
+    case "$action" in
+        "pre-transaction")
+            local package_name="$2"
+            if [[ -z "$package_name" ]]; then
+                error_echo "Package name required for pre-transaction"
+                exit 1
+            fi
+            pre_transaction_hook "$package_name"
+            ;;
+        "post-transaction")
+            local package_name="$2"
+            if [[ -z "$package_name" ]]; then
+                error_echo "Package name required for post-transaction"
+                exit 1
+            fi
+            post_transaction_hook "$package_name"
+            ;;
+        "uninstall")
+            local package_name="$2"
+            if [[ -z "$package_name" ]]; then
+                error_echo "Package name required for uninstall"
+                exit 1
+            fi
+            # When uninstalling, first restore original files, then remove backups
+            pre_transaction_hook "$package_name"
+            uninstall_hook "$package_name"
+            ;;
+        "generate-hook")
+            generate_hook
+            ;;
+        "get-hooks")
+            local package_name="$2"
+            if [[ -z "$package_name" ]]; then
+                error_echo "Package name required for get-hooks"
+                exit 1
+            fi
+            hook_names "$package_name"
+            ;;
+        *)
+            error_echo "Unknown action: $action"
+            echo "Available actions: pre-transaction, post-transaction, uninstall, generate-hook, get-hooks"
+            exit 1
+            ;;
+    esac
+}
+
+# Run main if script is executed directly
+if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
+    main "$@"
+fi

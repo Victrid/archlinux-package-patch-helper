@@ -1,0 +1,33 @@
+pkgbase=nm-connectivity-patch
+pkgname=nm-connectivity-patch
+pkgver=0.0.1
+pkgrel=1
+pkgdesc='NetworkManager connectivity configuration patch'
+arch=(any)
+url='https://victrid.dev'
+license=(MIT)
+depends=(
+         networkmanager
+         )
+makedepends=()
+source=(
+        patch_helper.sh
+        20-connectivity.conf
+        )
+sha256sums=('SKIP'
+            'SKIP')
+
+# Patch configuration
+patch="networkmanager"
+patch_pair_files=( /usr/lib/NetworkManager/conf.d/20-connectivity.conf 20-connectivity.conf )
+
+
+build() {
+  source "$srcdir/patch_helper.sh"
+  patch_build
+}
+
+package() {
+  source "$srcdir/patch_helper.sh"
+  patch_install
+}

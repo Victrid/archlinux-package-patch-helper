@@ -1,0 +1,112 @@
+#!/bin/bash
+
+# Patch package helper script for PKGBUILD integration
+# This script provides functions that can be sourced in PKGBUILD files
+
+PATCH_SCRIPT=${patch_script:-"patch.sh"}
+PATCH_INFO_NAME=${patch_info_name:-"patch.info"}
+PATCH_LOCATION=${patch_location:-"/usr/share/libalpm/patches"}
+PATCH_BACKUP_DIR=${patch_backup_dir:-"/var/lib/libalpm/patches"}
+PATCH_DEBUG=${patch_debug:-0}
+
+function __extract() {
+tmpf=$(mktemp)
+
+cat  > "$tmpf" << EOF
+@__PATCH_SCRIPT__@
+EOF
+
+# shellcheck disable=SC2154
+base64 -d "$tmpf" > "$srcdir/$PATCH_SCRIPT"
+rm "$tmpf"
+
+sed -i -e "s|@__PATCH_LOCATION__@|$PATCH_LOCATION|g" \
+    -e "s|@__PATCH_BACKUP_DIR__@|$PATCH_BACKUP_DIR|g" \
+    -e "s|@__PATCH_DEBUG__@|$PATCH_DEBUG|g" \
+    "$srcdir/$PATCH_SCRIPT"
+}
+
+function __validate() {
+    # Validate required variables are set
+    if [[ -z "$pkgname" ]]; then
+        echo "Error: pkgname not set"
+        return 1
+    fi
+    
+    if [[ -z "$patch" ]]; then
+        echo "Error: patch (original package) not set"
+        return 1
+    fi
+    
+    if [[ -z "${patch_pair_files[*]}" ]]; then
+        echo "Error: patch_pair_files not set"
+        return 1
+    fi
+    
+    if [[ -z "$pkgdir" ]]; then
+        echo "Error: pkgdir not set"
+        return 1
+    fi
+}
+
+function patch_build() {
+    __validate || return 1
+    __extract
+    # build alpm hooks
+    cd "$srcdir" || return 1
+    cat > "$PATCH_INFO_NAME" << EOF
+package=$pkgname
+patch=$patch
+location=$PATCH_LOCATION/$pkgname
+patch_pair_files=${patch_pair_files[@]}
+EOF
+
+    bash "$srcdir/$PATCH_SCRIPT" generate-hook || return 1
+    return 0
+}
+
+# Function to install patch files during package installation
+function patch_install() {
+    __validate || return 1
+
+    # Create patch share directory in package
+    local patch_share="$pkgdir/$PATCH_LOCATION/$pkgname"
+
+    # Install perl script to package
+    install -Dm400 "$srcdir/$PATCH_SCRIPT" "$patch_share/patch.sh"
+    
+    # Install patch files
+    for ((i=0; i<${#patch_pair_files[@]}; i+=2)); do
+        local new_file="${patch_pair_files[i+1]}"
+        
+        # Copy new file to patch share directory
+        if [[ -f "$srcdir/$new_file" ]]; then
+            # We store patches with read-only permissions
+            install -Dm400 "$srcdir/$new_file" "$patch_share/$new_file" || {
+                echo "Error: Failed to copy $new_file to $patch_share/"
+                return 1
+            }
+            echo "Installed patch file: $new_file"
+        else
+            echo "Warning: New file '$new_file' not found, skipping"
+        fi
+    done
+
+    # Install patch info file
+    install -Dm400 "$srcdir/$PATCH_INFO_NAME" "$patch_share/patch.info"
+
+    # Install hook file
+    mapfile -t hook_files < <(bash "$srcdir/$PATCH_SCRIPT" get-hooks "$pkgname")
+    for hook_file in "${hook_files[@]}"; do
+        if [[ -f "$srcdir/$hook_file" ]]; then
+            install -Dm644 "$srcdir/$hook_file" "$pkgdir/usr/share/libalpm/hooks/$hook_file" || {
+                echo "Error: Failed to install hook $hook_file"
+                return 1
+            }
+            echo "Installed hook file: $hook_file"
+        else
+            echo "Warning: Hook file '$hook_file' not found, skipping"
+        fi
+    done
+    return 0
+}
