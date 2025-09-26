@@ -10,45 +10,19 @@ This system allows you to create "patch packages" that can replace files from ex
 2. **During removal**: Restoring the original file from backup
 3. **During updates**: Properly handling file replacement in both pre- and post-transaction hooks
 
-## Project Structure
-
-### Core Files
-
-- **`patch.sh.in`** - Template for the main patch management script (Bash-based)
-- **`patch_helper.sh.in`** - Template for PKGBUILD integration helper script
-- **`Makefile`** - Build system to generate the final `patch_helper.sh`
-
-### Example Files
-
-- **`example/PKGBUILD`** - Example patch package configuration
-- **`example/20-connectivity.conf`** - Example patched configuration file
-
-## Components
-
-### 1. `patch.sh` - Bash Script
-The main patch management script that handles:
-- Patch package installation and removal
-- Pacman hook generation
-- Transaction handling (pre/post hooks)
-
-### 2. `patch_helper.sh` - Shell Script
-PKGBUILD integration helper that provides:
-- `patch_build()` - Validation and hook generation during build()
-- `patch_install()` - File installation during package()
-- Automatic script generation from templates
-
-## Building the Helper Script
-
-The project uses a build system to generate the final `patch_helper.sh`:
-
-```bash
-# Build the helper script
-make
-```
 
 ## Usage
 
 ### Creating a Patch Package
+
+The secure method to prevent supply chain attacks is to generate it yourself from the source files. All dependencies are included with `base-devel`, you can just clone or download the repository and run `make` to get it.
+
+You can also download it from release page, and shortener link:
+
+https://victr.id/patch_helper/{version}.sh (Pinned version, use checksums in Github Release page)
+https://victr.id/patch_helper.sh (Always redirect to the latest version, you can use SKIP to skip checksums)
+
+in your makepkg.
 
 Create a PKGBUILD with the following structure:
 
@@ -58,6 +32,13 @@ Create a PKGBUILD with the following structure:
 # Patch configuration
 patch="networkmanager"
 patch_pair_files=( dst_1 src_file_1 dst_2 src_file_2 )
+
+source=(
+        "patch_helper.sh" # Compile your own or download from Github Release
+        "patch_helper.sh::https://victr.id/patch_helper/v0.0.1.sh" # Link to v0.0.1
+        "patch_helper.sh::https://victr.id/patch_helper.sh" # Link to latest
+        ...
+        )
 
 build() {
     ...
@@ -97,6 +78,42 @@ Example usage:
 patch_script="custom-patch.sh"
 patch_location="/usr/share/custom-patches"
 patch_debug=1
+```
+
+## Project Structure
+
+### Core Files
+
+- **`patch.sh.in`** - Template for the main patch management script (Bash-based)
+- **`patch_helper.sh.in`** - Template for PKGBUILD integration helper script
+- **`Makefile`** - Build system to generate the final `patch_helper.sh`
+
+### Example Files
+
+- **`example/PKGBUILD`** - Example patch package configuration
+- **`example/20-connectivity.conf`** - Example patched configuration file
+
+## Components
+
+### 1. `patch.sh` - Bash Script
+The main patch management script that handles:
+- Patch package installation and removal
+- Pacman hook generation
+- Transaction handling (pre/post hooks)
+
+### 2. `patch_helper.sh` - Shell Script
+PKGBUILD integration helper that provides:
+- `patch_build()` - Validation and hook generation during build()
+- `patch_install()` - File installation during package()
+- Automatic script generation from templates
+
+## Building the Helper Script
+
+The project uses a build system to generate the final `patch_helper.sh`:
+
+```bash
+# Build the helper script
+make
 ```
 
 ## How It Works
